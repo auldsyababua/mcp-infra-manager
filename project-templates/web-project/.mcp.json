@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "database": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "DATABASE_URL": "${DATABASE_URL:-postgresql://localhost/myapp_dev}"
+      }
+    },
+    "redis": {
+      "type": "stdio", 
+      "command": "node",
+      "args": ["./tools/redis-mcp.js"],
+      "env": {
+        "REDIS_URL": "${REDIS_URL:-redis://localhost:6379}"
+      }
+    },
+    "api-testing": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@your-org/api-test-mcp"],
+      "env": {
+        "API_BASE_URL": "${API_BASE_URL:-http://localhost:3000}",
+        "API_KEY": "${API_KEY}"
+      }
+    },
+    "deployment": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["./deploy/mcp-deploy-server.js"],
+      "env": {
+        "DEPLOY_ENV": "${DEPLOY_ENV:-development}",
+        "AWS_PROFILE": "${AWS_PROFILE:-default}"
+      }
+    }
+  }
+}

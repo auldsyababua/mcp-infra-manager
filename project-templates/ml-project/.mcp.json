@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "jupyter": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_jupyter_server"],
+      "env": {
+        "JUPYTER_URL": "${JUPYTER_URL:-http://localhost:8888}",
+        "JUPYTER_TOKEN": "${JUPYTER_TOKEN}"
+      }
+    },
+    "mlflow": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_mlflow"],
+      "env": {
+        "MLFLOW_TRACKING_URI": "${MLFLOW_TRACKING_URI:-http://localhost:5000}"
+      }
+    },
+    "ollama": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-ollama"],
+      "env": {
+        "OLLAMA_HOST": "${OLLAMA_HOST:-http://localhost:11434}"
+      }
+    },
+    "data-tools": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["./scripts/data-mcp-server.py"],
+      "env": {
+        "DATA_DIR": "${PWD}/data",
+        "CACHE_DIR": "${PWD}/.cache"
+      }
+    }
+  }
+}
