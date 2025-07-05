@@ -1,0 +1,112 @@
+# Access Profiles - Define which services different contexts can access
+# Used by Claude Desktop, Claude Code, and context-engineer-cli-tool
+
+version: "1.0"
+profiles:
+  # Default profile for general tasks
+  default:
+    name: "Default Access"
+    description: "Standard access for general development tasks"
+    services:
+      - github
+      - filesystem
+      - memory
+      - omnisearch
+      - context7
+    
+  # Extended research capabilities
+  research:
+    name: "Research Access"
+    description: "Extended access for research and information gathering"
+    services:
+      - github
+      - filesystem
+      - memory
+      - omnisearch
+      - brave-search
+      - context7
+      - sequential-thinking
+    
+  # AI Rails project specific
+  ai-rails:
+    name: "AI Rails Project"
+    description: "Access for AI Rails development"
+    services:
+      - github
+      - filesystem
+      - memory
+      - omnisearch
+      - context7
+      - sequential-thinking
+      - codebase-mcp
+      - secrets-mcp
+      - mcp-code-analysis
+    
+  # Project Shelby specific
+  project-shelby:
+    name: "Project Shelby"
+    description: "Access for Project Shelby knowledge work"
+    services:
+      - github
+      - filesystem
+      - memory
+      - omnisearch
+      - context7
+      - sequential-thinking
+      - archon
+      - claude-collective
+    
+  # Development profile with code tools
+  development:
+    name: "Development Tools"
+    description: "Full development environment access"
+    services:
+      - github
+      - filesystem
+      - memory
+      - omnisearch
+      - context7
+      - sequential-thinking
+      - mcp-code-analysis
+    
+  # Restricted profile for sensitive operations
+  restricted:
+    name: "Restricted Access"
+    description: "Minimal access for sensitive operations"
+    services:
+      - filesystem  # Read-only mode enforced
+      - memory
+    
+  # Admin profile with full access
+  admin:
+    name: "Administrator"
+    description: "Full access to all services"
+    services:
+      - "*"  # All services
+
+# Profile selection rules (for automatic selection)
+selection_rules:
+  - condition:
+      project_path_contains: "ai-rails"
+    profile: "ai-rails"
+    
+  - condition:
+      project_path_contains: "project-shelby"
+    profile: "project-shelby"
+    
+  - condition:
+      task_contains: ["research", "search", "find", "information"]
+    profile: "research"
+    
+  - condition:
+      task_contains: ["sensitive", "secret", "credential"]
+    profile: "restricted"
+    
+  - condition:
+      context_contains: ["development", "coding", "refactor"]
+    profile: "development"
+    
+  # Default fallback
+  - condition:
+      default: true
+    profile: "default"

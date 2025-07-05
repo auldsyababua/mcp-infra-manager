@@ -1,0 +1,139 @@
+# MCP Services Registry - Single source of truth for all MCP services
+# To add a new service, just add an entry here and run: mcp-manager add <service-name>
+
+version: "1.0"
+services:
+  # Core Services - Always available
+  github:
+    name: "GitHub MCP"
+    description: "GitHub API integration for code operations"
+    port: 8081
+    command: "npx -y @modelcontextprotocol/server-github"
+    env_vars:
+      - GITHUB_TOKEN
+    health_endpoint: "/health"
+    category: "core"
+    
+  filesystem:
+    name: "Filesystem MCP"
+    description: "Local file system access (sandboxed)"
+    port: 8082
+    command: "npx -y @modelcontextprotocol/server-filesystem ${HOME}/"
+    category: "core"
+    
+  memory:
+    name: "Memory MCP"
+    description: "Persistent memory storage across sessions"
+    port: 8083
+    command: "npx -y @modelcontextprotocol/server-memory"
+    category: "core"
+
+  # Search Services
+  omnisearch:
+    name: "OmniSearch MCP"
+    description: "Multi-provider web search (Brave, Kagi, Perplexity, Tavily)"
+    port: 8084
+    command: "npx -y mcp-omnisearch"
+    env_vars:
+      - BRAVE_API_KEY
+      - KAGI_API_KEY
+      - PERPLEXITY_API_KEY
+      - TAVILY_API_KEY
+    health_endpoint: "/health"
+    category: "search"
+    
+  brave-search:
+    name: "Brave Search MCP"
+    description: "Direct Brave search API access"
+    port: 8085
+    command: "npx -y @modelcontextprotocol/server-brave-search"
+    env_vars:
+      - BRAVE_API_KEY
+    category: "search"
+
+  # AI/Context Services
+  context7:
+    name: "Context7 MCP"
+    description: "Upstash Redis-based context management"
+    port: 8086
+    command: "npx -y @upstash/context7-mcp"
+    env_vars:
+      - UPSTASH_REDIS_URL
+      - UPSTASH_REDIS_TOKEN
+    category: "ai-context"
+    
+  sequential-thinking:
+    name: "Sequential Thinking MCP"
+    description: "Chain of thought reasoning tools"
+    port: 8087
+    command: "npx -y @modelcontextprotocol/server-sequential-thinking"
+    category: "ai-context"
+
+  # Project-Specific Services
+  codebase-mcp:
+    name: "Codebase Analysis MCP"
+    description: "AI Rails codebase analysis and search"
+    port: 8003
+    systemd_unit: "mcp-service@codebase-mcp"
+    project: "ai-rails"
+    category: "project"
+    location: "workhorse"
+    
+  secrets-mcp:
+    name: "Secrets Manager MCP"
+    description: "Secure secrets management with auth"
+    port: 8005
+    systemd_unit: "mcp-service@secrets-mcp"
+    project: "ai-rails"
+    requires_auth: true
+    env_vars:
+      - AI_RAILS_SECRETS_MCP_AUTH_TOKEN
+    category: "project"
+    location: "workhorse"
+    
+  archon:
+    name: "Archon MCP"
+    description: "Graph-based knowledge system"
+    port: 8100
+    docker_container: "archon-mcp"
+    project: "project-shelby"
+    env_vars:
+      - GRAPH_SERVICE_URL
+    category: "project"
+    location: "workhorse"
+    
+  claude-collective:
+    name: "Claude Collective MCP"
+    description: "Shared knowledge PostgreSQL database"
+    port: 8101
+    command: "python3 /opt/mcp-services/claude-collective/server.py"
+    project: "project-shelby"
+    env_vars:
+      - SHELBY_DB_HOST
+      - SHELBY_DB_PORT
+      - SHELBY_DB_NAME
+      - SHELBY_DB_USER
+      - SHELBY_DB_PASSWORD
+    category: "project"
+    location: "workhorse"
+
+  # Development Tools
+  mcp-code-analysis:
+    name: "Code Analysis MCP"
+    description: "AI-powered code analysis and refactoring"
+    port: 8501
+    docker_container: "mcp-code-analysis"
+    category: "development"
+    location: "workhorse"
+
+# Service defaults
+defaults:
+  restart_policy: "on-failure"
+  restart_delay: 5
+  max_restarts: 3
+  memory_limit: "1G"
+  memory_high: "768M"
+  cpu_quota: "50%"
+  user: "mcp-service"
+  group: "mcp-service"
+  work_dir: "/opt/mcp-services"

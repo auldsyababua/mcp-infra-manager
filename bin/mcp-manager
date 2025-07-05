@@ -1,0 +1,515 @@
+#!/bin/bash
+# MCP Infrastructure Manager - Main management script
+# This tool manages all MCP services across local and remote (workhorse) systems
+
+set -euo pipefail
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+REGISTRY_FILE="$BASE_DIR/registry/services.yaml"
+PROFILES_FILE="$BASE_DIR/profiles/access-profiles.yaml"
+ENV_FILE="${MCP_ENV_FILE:-$HOME/.config/mcp/.env}"
+WORKHORSE_IP="${WORKHORSE_IP:-10.0.0.2}"
+LOG_DIR="${MCP_LOG_DIR:-$HOME/.mcp/logs}"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# Helper functions
+log() {
+    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $*"
+}
+
+success() {
+    echo -e "${GREEN}✅${NC} $*"
+}
+
+error() {
+    echo -e "${RED}❌${NC} $*" >&2
+}
+
+warning() {
+    echo -e "${YELLOW}⚠️${NC} $*"
+}
+
+# Check if a service is already running
+is_service_running() {
+    local service=$1
+    local port=$(yq eval ".services.$service.port // 0" "$REGISTRY_FILE")
+    
+    # Check if port is in use
+    if lsof -i ":$port" >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # Check for process by name
+    if pgrep -f "mcp.*$service" >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# List all services with their status
+list_services() {
+    echo -e "${BLUE}MCP Services Registry${NC}"
+    echo "====================="
+    echo
+    
+    local categories=$(yq eval '.services.* | select(has("category")) | .category' "$REGISTRY_FILE" | sort -u)
+    
+    for category in $categories; do
+        echo -e "${YELLOW}[$category]${NC}"
+        
+        yq eval ".services | to_entries | .[] | select(.value.category == \"$category\") | .key" "$REGISTRY_FILE" | \
+        while read -r service; do
+            local name=$(yq eval ".services.$service.name" "$REGISTRY_FILE")
+            local port=$(yq eval ".services.$service.port" "$REGISTRY_FILE")
+            local desc=$(yq eval ".services.$service.description" "$REGISTRY_FILE")
+            local location=$(yq eval ".services.$service.location // \"local\"" "$REGISTRY_FILE")
+            
+            # Check status
+            if is_service_running "$service"; then
+                status="${GREEN}[RUNNING]${NC}"
+            else
+                status="${RED}[STOPPED]${NC}"
+            fi
+            
+            echo -e "  $service $status"
+            echo -e "    Name: $name"
+            echo -e "    Port: $port"
+            echo -e "    Location: $location"
+            echo -e "    Description: $desc"
+            echo
+        done
+    done
+}
+
+# Start a service
+start_service() {
+    local service=$1
+    
+    if ! yq eval ".services.$service" "$REGISTRY_FILE" >/dev/null 2>&1; then
+        error "Service '$service' not found in registry"
+        return 1
+    fi
+    
+    if is_service_running "$service"; then
+        warning "Service '$service' is already running"
+        return 0
+    fi
+    
+    local location=$(yq eval ".services.$service.location // \"local\"" "$REGISTRY_FILE")
+    
+    if [[ "$location" == "workhorse" ]]; then
+        log "Starting remote service '$service' on workhorse..."
+        ssh "workhorse@$WORKHORSE_IP" "sudo systemctl start mcp-service@$service"
+    else
+        log "Starting local service '$service'..."
+        "$SCRIPT_DIR/mcp-launcher" "$service" &
+    fi
+    
+    # Wait and verify
+    sleep 2
+    if is_service_running "$service"; then
+        success "Service '$service' started successfully"
+    else
+        error "Failed to start service '$service'"
+        return 1
+    fi
+}
+
+# Stop a service
+stop_service() {
+    local service=$1
+    local location=$(yq eval ".services.$service.location // \"local\"" "$REGISTRY_FILE")
+    
+    log "Stopping service '$service'..."
+    
+    if [[ "$location" == "workhorse" ]]; then
+        ssh "workhorse@$WORKHORSE_IP" "sudo systemctl stop mcp-service@$service"
+    else
+        local port=$(yq eval ".services.$service.port" "$REGISTRY_FILE")
+        local pid=$(lsof -t -i ":$port" 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            kill "$pid"
+        fi
+    fi
+    
+    success "Service '$service' stopped"
+}
+
+# Add a new service (interactive)
+add_service() {
+    echo -e "${BLUE}Add New MCP Service${NC}"
+    echo "=================="
+    
+    read -p "Service ID (e.g., 'my-tool'): " service_id
+    read -p "Service Name: " service_name
+    read -p "Description: " description
+    read -p "Port: " port
+    read -p "Category (core/search/ai-context/project/development): " category
+    read -p "Location (local/workhorse) [local]: " location
+    location=${location:-local}
+    
+    read -p "Command (or 'systemd' for systemd service): " command
+    
+    # Environment variables
+    echo "Environment variables (comma-separated, or press Enter for none):"
+    read -p "Variables: " env_vars
+    
+    # Build YAML entry
+    cat >> "$REGISTRY_FILE" << EOF
+
+  $service_id:
+    name: "$service_name"
+    description: "$description"
+    port: $port
+    category: "$category"
+    location: "$location"
+EOF
+    
+    if [[ "$command" == "systemd" ]]; then
+        echo "    systemd_unit: \"mcp-service@$service_id\"" >> "$REGISTRY_FILE"
+    else
+        echo "    command: \"$command\"" >> "$REGISTRY_FILE"
+    fi
+    
+    if [[ -n "$env_vars" ]]; then
+        echo "    env_vars:" >> "$REGISTRY_FILE"
+        IFS=',' read -ra VARS <<< "$env_vars"
+        for var in "${VARS[@]}"; do
+            echo "      - ${var// /}" >> "$REGISTRY_FILE"
+        done
+    fi
+    
+    success "Service '$service_id' added to registry"
+    echo
+    echo "Next steps:"
+    echo "1. Add any required environment variables to $ENV_FILE"
+    echo "2. Deploy service code to appropriate location"
+    echo "3. Start service with: mcp-manager start $service_id"
+}
+
+# Update service configuration
+update_service() {
+    local service=$1
+    local field=$2
+    local value=$3
+    
+    if ! yq eval ".services.$service" "$REGISTRY_FILE" >/dev/null 2>&1; then
+        error "Service '$service' not found"
+        return 1
+    fi
+    
+    # Update the field
+    yq eval ".services.$service.$field = \"$value\"" -i "$REGISTRY_FILE"
+    success "Updated $service.$field = $value"
+}
+
+# Manage API keys
+manage_keys() {
+    local action=$1
+    shift
+    
+    case "$action" in
+        list)
+            echo -e "${BLUE}Required Environment Variables by Service${NC}"
+            echo "========================================"
+            
+            yq eval '.services.* | select(has("env_vars")) | {name: .name, vars: .env_vars}' "$REGISTRY_FILE" -o json | \
+            jq -r '. | "\(.name):\n  " + (.vars | join("\n  "))'
+            ;;
+            
+        check)
+            echo -e "${BLUE}Checking Environment Variables${NC}"
+            echo "============================="
+            
+            local missing=0
+            yq eval '.services | to_entries | .[] | select(.value | has("env_vars"))' "$REGISTRY_FILE" -o json | \
+            while IFS= read -r entry; do
+                local service=$(echo "$entry" | jq -r '.key')
+                local vars=$(echo "$entry" | jq -r '.value.env_vars[]')
+                
+                echo -e "\n${YELLOW}$service:${NC}"
+                while IFS= read -r var; do
+                    if grep -q "^$var=" "$ENV_FILE" 2>/dev/null; then
+                        success "$var is set"
+                    else
+                        error "$var is missing"
+                        ((missing++))
+                    fi
+                done <<< "$vars"
+            done
+            
+            if [[ $missing -eq 0 ]]; then
+                echo
+                success "All required environment variables are set"
+            else
+                echo
+                warning "$missing environment variables are missing"
+            fi
+            ;;
+            
+        set)
+            local var_name=$1
+            local var_value=$2
+            
+            if [[ -z "$var_name" || -z "$var_value" ]]; then
+                error "Usage: mcp-manager keys set VAR_NAME VAR_VALUE"
+                return 1
+            fi
+            
+            # Backup existing env file
+            cp "$ENV_FILE" "$ENV_FILE.backup.$(date +%Y%m%d_%H%M%S)"
+            
+            # Update or add the variable
+            if grep -q "^$var_name=" "$ENV_FILE" 2>/dev/null; then
+                # Update existing
+                sed -i.tmp "s|^$var_name=.*|$var_name=$var_value|" "$ENV_FILE"
+                rm -f "$ENV_FILE.tmp"
+                success "Updated $var_name"
+            else
+                # Add new
+                echo "$var_name=$var_value" >> "$ENV_FILE"
+                success "Added $var_name"
+            fi
+            ;;
+            
+        *)
+            error "Unknown keys action: $action"
+            echo "Usage: mcp-manager keys [list|check|set VAR VALUE]"
+            return 1
+            ;;
+    esac
+}
+
+# Show services for a profile
+show_profile() {
+    local profile=${1:-default}
+    
+    if ! yq eval ".profiles.$profile" "$PROFILES_FILE" >/dev/null 2>&1; then
+        error "Profile '$profile' not found"
+        return 1
+    fi
+    
+    local name=$(yq eval ".profiles.$profile.name" "$PROFILES_FILE")
+    local desc=$(yq eval ".profiles.$profile.description" "$PROFILES_FILE")
+    
+    echo -e "${BLUE}Profile: $name${NC}"
+    echo "$desc"
+    echo
+    echo "Allowed services:"
+    
+    yq eval ".profiles.$profile.services[]" "$PROFILES_FILE" | \
+    while read -r service; do
+        if [[ "$service" == "*" ]]; then
+            echo "  - ALL SERVICES"
+        else
+            local service_name=$(yq eval ".services.$service.name // \"$service\"" "$REGISTRY_FILE")
+            local service_desc=$(yq eval ".services.$service.description // \"\"" "$REGISTRY_FILE")
+            echo "  - $service: $service_name"
+            if [[ -n "$service_desc" ]]; then
+                echo "    $service_desc"
+            fi
+        fi
+    done
+}
+
+# Generate configuration for different tools
+generate_config() {
+    local tool=$1
+    local profile=${2:-default}
+    local output=${3:-}
+    
+    case "$tool" in
+        claude-desktop)
+            # Generate Claude Desktop configuration
+            if [[ -z "$output" ]]; then
+                output="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+            fi
+            
+            "$SCRIPT_DIR/../scripts/generate-claude-config.py" "$profile" "$output"
+            success "Generated Claude Desktop config for profile '$profile'"
+            echo "Config saved to: $output"
+            ;;
+            
+        context-engineer)
+            # Generate context for context-engineer-cli-tool
+            "$SCRIPT_DIR/../scripts/generate-context-prompt.py" "$profile"
+            ;;
+            
+        *)
+            error "Unknown tool: $tool"
+            echo "Supported tools: claude-desktop, context-engineer"
+            return 1
+            ;;
+    esac
+}
+
+# Health check all services
+health_check() {
+    echo -e "${BLUE}MCP Services Health Check${NC}"
+    echo "========================"
+    echo
+    
+    local healthy=0
+    local unhealthy=0
+    
+    yq eval '.services | to_entries | .[]' "$REGISTRY_FILE" -o json | \
+    while IFS= read -r entry; do
+        local service=$(echo "$entry" | jq -r '.key')
+        local port=$(echo "$entry" | jq -r '.value.port')
+        local health_endpoint=$(echo "$entry" | jq -r '.value.health_endpoint // "/health"')
+        local location=$(echo "$entry" | jq -r '.value.location // "local"')
+        
+        echo -n "Checking $service... "
+        
+        if is_service_running "$service"; then
+            # Try health endpoint
+            local base_url="http://localhost:$port"
+            if [[ "$location" == "workhorse" ]]; then
+                base_url="http://$WORKHORSE_IP:$port"
+            fi
+            
+            if curl -s -f "$base_url$health_endpoint" >/dev/null 2>&1; then
+                success "Healthy"
+                ((healthy++))
+            else
+                warning "Running but health check failed"
+                ((unhealthy++))
+            fi
+        else
+            error "Not running"
+            ((unhealthy++))
+        fi
+    done
+    
+    echo
+    echo "Summary: $healthy healthy, $unhealthy unhealthy"
+}
+
+# Main command handler
+case "${1:-help}" in
+    list|ls)
+        list_services
+        ;;
+        
+    start)
+        if [[ -z "${2:-}" ]]; then
+            error "Usage: mcp-manager start <service>"
+            exit 1
+        fi
+        start_service "$2"
+        ;;
+        
+    stop)
+        if [[ -z "${2:-}" ]]; then
+            error "Usage: mcp-manager stop <service>"
+            exit 1
+        fi
+        stop_service "$2"
+        ;;
+        
+    restart)
+        if [[ -z "${2:-}" ]]; then
+            error "Usage: mcp-manager restart <service>"
+            exit 1
+        fi
+        stop_service "$2"
+        sleep 1
+        start_service "$2"
+        ;;
+        
+    add)
+        add_service
+        ;;
+        
+    update)
+        if [[ -z "${2:-}" || -z "${3:-}" || -z "${4:-}" ]]; then
+            error "Usage: mcp-manager update <service> <field> <value>"
+            exit 1
+        fi
+        update_service "$2" "$3" "$4"
+        ;;
+        
+    keys)
+        manage_keys "${@:2}"
+        ;;
+        
+    profile)
+        show_profile "${2:-default}"
+        ;;
+        
+    generate)
+        if [[ -z "${2:-}" ]]; then
+            error "Usage: mcp-manager generate <tool> [profile] [output]"
+            exit 1
+        fi
+        generate_config "$2" "${3:-default}" "${4:-}"
+        ;;
+        
+    health)
+        health_check
+        ;;
+        
+    help|--help|-h)
+        cat << EOF
+${BLUE}MCP Infrastructure Manager${NC}
+
+Centralized management for all MCP services
+
+${YELLOW}Usage:${NC} mcp-manager <command> [options]
+
+${YELLOW}Service Management:${NC}
+  list, ls              List all services and their status
+  start <service>       Start a specific service
+  stop <service>        Stop a specific service
+  restart <service>     Restart a specific service
+  health               Check health of all services
+
+${YELLOW}Configuration:${NC}
+  add                  Add a new service (interactive)
+  update <service> <field> <value>
+                       Update service configuration
+  keys list            List required environment variables
+  keys check           Check if all variables are set
+  keys set <var> <val> Set an environment variable
+
+${YELLOW}Access Control:${NC}
+  profile [name]       Show services for a profile
+  generate <tool> [profile] [output]
+                       Generate config for tools:
+                       - claude-desktop: Claude Desktop config
+                       - context-engineer: Context prompt
+
+${YELLOW}Examples:${NC}
+  mcp-manager list
+  mcp-manager start omnisearch
+  mcp-manager keys check
+  mcp-manager keys set BRAVE_API_KEY "your-key-here"
+  mcp-manager profile research
+  mcp-manager generate claude-desktop research
+
+${YELLOW}Environment Variables:${NC}
+  MCP_ENV_FILE         Path to environment file (default: ~/.config/mcp/.env)
+  WORKHORSE_IP         IP of workhorse server (default: 10.0.0.2)
+  MCP_LOG_DIR          Log directory (default: ~/.mcp/logs)
+
+EOF
+        ;;
+        
+    *)
+        error "Unknown command: $1"
+        echo "Run 'mcp-manager help' for usage"
+        exit 1
+        ;;
+esac

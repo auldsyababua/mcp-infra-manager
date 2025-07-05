@@ -1,0 +1,41 @@
+[Unit]
+Description=MCP Service: %i
+After=network.target
+Documentation=https://github.com/modelcontextprotocol/
+
+[Service]
+Type=simple
+User=mcp-service
+Group=mcp-service
+WorkingDirectory=/opt/mcp-services/%i
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mcp-services/%i/data
+ReadOnlyPaths=/opt/mcp-services/%i
+
+# Resource limits
+MemoryMax=1G
+MemoryHigh=768M
+CPUQuota=50%
+
+# Environment
+EnvironmentFile=/etc/mcp-services/global.env
+EnvironmentFile=-/etc/mcp-services/%i.env
+
+# Start command
+ExecStartPre=/opt/mcp-services/scripts/pre-start.sh %i
+ExecStart=/opt/mcp-services/%i/venv/bin/python /opt/mcp-services/%i/server.py
+ExecReload=/bin/kill -SIGUSR1 $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=3
+StartLimitInterval=60s
+
+[Install]
+WantedBy=multi-user.target
