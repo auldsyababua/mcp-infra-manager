@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""
+Smart MCP Proxy - Context-aware MCP access with intelligent resource management
+
+Features:
+- Context-aware MCP filtering based on project/location
+- Automatic startup/shutdown of MCP servers
+- Inactivity timeout management
+- Permission levels for different contexts
+- Single endpoint for all Claude instances
+"""
+
+import asyncio
+import json
+import os
+import psutil
+import time
+import yaml
+from aiohttp import web
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+import subprocess
+import signal
+import logging
+
+# Configuration
+PROXY_PORT = 8888
+CONTROLLER_PORT = 8080
+CONFIG_DIR = Path.home() / ".config" / "mcp"
+REGISTRY_FILE = Path(__file__).parent.parent / "registry" / "services.yaml"
+ACTIVITY_TIMEOUT = 300  # 5 minutes of inactivity before auto-shutdown
+CHECK_INTERVAL = 60  # Check for inactive services every minute
+
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('mcp-smart-proxy')
+
+class MCPService:
+    """Represents an MCP service with lifecycle management"""
+    
+    def __init__(self, name: str, config: dict):
+        self.name = name
+        self.config = config
+        self.process: Optional[subprocess.Popen] = None
+        self.last_activity = datetime.now()
+        self.port = config.get('port')
+        self.command = config.get('command')
+        self.env_vars = config.get('env', {})
+        
+    def is_running(self) -> bool:
+        """Check if service is running"""
+        if self.process and self.process.poll() is None:
+            return True
+        
+        # Check if port is in use
+        for conn in psutil.net_connections():
+            if conn.laddr.port == self.port and conn.status == 'LISTEN':
+                return True
+        
+        return False
+    
+    async def start(self) -> bool:
+        """Start the MCP service"""
+        if self.is_running():
+            logger.info(f"{self.name} is already running")
+            return True
+        
+        try:
+            env = os.environ.copy()
+            env.update(self.env_vars)
+            
+            logger.info(f"Starting {self.name} on port {self.port}")
+            self.process = subprocess.Popen(
+                self.command,
+                shell=True,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Wait a bit to ensure it starts
+            await asyncio.sleep(2)
+            
+            if self.is_running():
+                logger.info(f"{self.name} started successfully")
+                self.last_activity = datetime.now()
+                return True
+            else:
+                logger.error(f"{self.name} failed to start")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error starting {self.name}: {e}")
+            return False
+    
+    async def stop(self) -> bool:
+        """Stop the MCP service"""
+        if not self.is_running():
+            return True
+        
+        try:
+            logger.info(f"Stopping {self.name}")
+            
+            if self.process:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+            
+            # Kill any process on the port
+            for conn in psutil.net_connections():
+                if conn.laddr.port == self.port and conn.status == 'LISTEN':
+                    try:
+                        psutil.Process(conn.pid).terminate()
+                    except:
+                        pass
+            
+            logger.info(f"{self.name} stopped")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error stopping {self.name}: {e}")
+            return False
+    
+    def update_activity(self):
+        """Update last activity timestamp"""
+        self.last_activity = datetime.now()
+    
+    def is_inactive(self) -> bool:
+        """Check if service has been inactive beyond timeout"""
+        return (datetime.now() - self.last_activity).seconds > ACTIVITY_TIMEOUT
+
+class ContextManager:
+    """Manages context-based MCP access"""
+    
+    def __init__(self):
+        self.contexts = {
+            'global': {
+                'path_patterns': ['${HOME}'],
+                'allowed_mcps': ['github', 'filesystem', 'memory', 'sequential-thinking', 'omnisearch'],
+                'priority': 0
+            },
+            'project': {
+                'path_patterns': ['${HOME}/Desktop/projects/*'],
+                'allowed_mcps': [],  # Determined by project config
+                'priority': 10
+            },
+            'system': {
+                'path_patterns': ['/'],
+                'allowed_mcps': ['*'],  # All MCPs
+                'priority': -10
+            }
+        }
+    
+    def get_allowed_mcps(self, working_dir: str, project_config: Optional[dict] = None) -> Set[str]:
+        """Get allowed MCPs based on context"""
+        path = Path(working_dir)
+        allowed = set()
+        
+        # Sort contexts by priority (higher first)
+        sorted_contexts = sorted(
+            self.contexts.items(),
+            key=lambda x: x[1]['priority'],
+            reverse=True
+        )
+        
+        for context_name, context in sorted_contexts:
+            for pattern in context['path_patterns']:
+                if self._path_matches(path, pattern):
+                    if context_name == 'project' and project_config:
+                        # Use project-specific MCPs
+                        allowed.update(project_config.get('allowed_mcps', []))
+                    elif '*' in context['allowed_mcps']:
+                        # All MCPs allowed
+                        return {'*'}
+                    else:
+                        allowed.update(context['allowed_mcps'])
+                    break
+        
+        return allowed
+    
+    def _path_matches(self, path: Path, pattern: str) -> bool:
+        """Check if path matches pattern"""
+        if '*' in pattern:
+            # Simple glob matching
+            pattern_parts = pattern.split('*')
+            path_str = str(path)
+            
+            if pattern_parts[0] and not path_str.startswith(pattern_parts[0]):
+                return False
+            if pattern_parts[-1] and not path_str.endswith(pattern_parts[-1]):
+                return False
+            
+            return True
+        else:
+            # Exact prefix match
+            return str(path).startswith(pattern)
+
+class SmartMCPProxy:
+    """Smart proxy for MCP services with context awareness and resource management"""
+    
+    def __init__(self):
+        self.services: Dict[str, MCPService] = {}
+        self.context_manager = ContextManager()
+        self.load_services()
+        
+    def load_services(self):
+        """Load service definitions from registry"""
+        with open(REGISTRY_FILE, 'r') as f:
+            registry = yaml.safe_load(f)
+        
+        for name, config in registry.get('services', {}).items():
+            if config.get('location', 'local') == 'local':
+                self.services[name] = MCPService(name, config)
+    
+    async def handle_request(self, request: web.Request) -> web.Response:
+        """Handle incoming requests and route to appropriate MCP"""
+        try:
+            # Extract context information
+            headers = dict(request.headers)
+            working_dir = headers.get('X-Working-Directory', os.getcwd())
+            project_config = self._load_project_config(working_dir)
+            
+            # Get allowed MCPs for this context
+            allowed_mcps = self.context_manager.get_allowed_mcps(working_dir, project_config)
+            
+            # Extract target MCP from request
+            path_parts = request.path.strip('/').split('/')
+            if not path_parts or not path_parts[0]:
+                return await self._list_available_mcps(allowed_mcps)
+            
+            target_mcp = path_parts[0]
+            
+            # Check if MCP is allowed in this context
+            if '*' not in allowed_mcps and target_mcp not in allowed_mcps:
+                return web.json_response({
+                    'error': f'MCP {target_mcp} not allowed in this context',
+                    'allowed': list(allowed_mcps)
+                }, status=403)
+            
+            # Ensure MCP is running
+            if target_mcp in self.services:
+                service = self.services[target_mcp]
+                if not service.is_running():
+                    success = await service.start()
+                    if not success:
+                        return web.json_response({
+                            'error': f'Failed to start MCP {target_mcp}'
+                        }, status=500)
+                
+                # Update activity
+                service.update_activity()
+                
+                # Forward request to MCP
+                return await self._forward_request(request, service)
+            else:
+                return web.json_response({
+                    'error': f'Unknown MCP: {target_mcp}'
+                }, status=404)
+                
+        except Exception as e:
+            logger.error(f"Error handling request: {e}")
+            return web.json_response({
+                'error': str(e)
+            }, status=500)
+    
+    def _load_project_config(self, working_dir: str) -> Optional[dict]:
+        """Load project-specific MCP configuration"""
+        config_path = Path(working_dir) / '.mcp' / 'config.json'
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        return None
+    
+    async def _list_available_mcps(self, allowed_mcps: Set[str]) -> web.Response:
+        """List available MCPs for the current context"""
+        available = []
+        
+        for name, service in self.services.items():
+            if '*' in allowed_mcps or name in allowed_mcps:
+                available.append({
+                    'name': name,
+                    'status': 'running' if service.is_running() else 'stopped',
+                    'port': service.port,
+                    'description': service.config.get('description', '')
+                })
+        
+        return web.json_response({
+            'mcps': available,
+            'context': {
+                'working_dir': allowed_mcps,
+                'allowed': list(allowed_mcps)
+            }
+        })
+    
+    async def _forward_request(self, request: web.Request, service: MCPService) -> web.Response:
+        """Forward request to MCP service"""
+        # TODO: Implement proper request forwarding
+        # For now, return a placeholder
+        return web.json_response({
+            'mcp': service.name,
+            'port': service.port,
+            'status': 'forwarded'
+        })
+    
+    async def cleanup_inactive_services(self):
+        """Periodically check and stop inactive services"""
+        while True:
+            try:
+                await asyncio.sleep(CHECK_INTERVAL)
+                
+                for name, service in self.services.items():
+                    if service.is_running() and service.is_inactive():
+                        logger.info(f"Stopping inactive service: {name}")
+                        await service.stop()
+                        
+            except Exception as e:
+                logger.error(f"Error in cleanup task: {e}")
+    
+    async def start(self):
+        """Start the smart proxy"""
+        app = web.Application()
+        app.router.add_route('*', '/{path:.*}', self.handle_request)
+        
+        # Start cleanup task
+        asyncio.create_task(self.cleanup_inactive_services())
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', PROXY_PORT)
+        
+        logger.info(f"Smart MCP Proxy starting on port {PROXY_PORT}")
+        await site.start()
+        
+        # Keep running
+        await asyncio.Event().wait()
+    
+    async def shutdown(self):
+        """Shutdown all services"""
+        logger.info("Shutting down Smart MCP Proxy")
+        
+        for name, service in self.services.items():
+            if service.is_running():
+                await service.stop()
+
+async def main():
+    proxy = SmartMCPProxy()
+    
+    # Handle shutdown signals
+    def signal_handler(sig, frame):
+        asyncio.create_task(proxy.shutdown())
+        asyncio.get_event_loop().stop()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        await proxy.start()
+    except KeyboardInterrupt:
+        await proxy.shutdown()
+
+if __name__ == "__main__":
+    asyncio.run(main())

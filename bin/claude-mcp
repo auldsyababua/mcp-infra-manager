@@ -1,0 +1,71 @@
+#!/bin/bash
+# Claude Code wrapper with MCP integration
+# This script launches Claude Code with proper MCP configuration
+
+# Configuration
+SMART_PROXY_PORT="${MCP_SMART_PROXY_PORT:-8888}"
+CLAUDE_CMD="${CLAUDE_CMD:-claude}"
+MCP_CONFIG_DIR="$HOME/.config/claude-mcp"
+
+# Ensure config directory exists
+mkdir -p "$MCP_CONFIG_DIR"
+
+# Generate MCP configuration for Claude Code
+generate_mcp_config() {
+    local working_dir="${PWD}"
+    local config_file="$MCP_CONFIG_DIR/mcp-config.json"
+    
+    # Create configuration pointing to smart proxy
+    cat > "$config_file" << EOF
+{
+  "mcpServers": {
+    "smart-proxy": {
+      "command": "curl",
+      "args": ["-X", "POST", "http://localhost:${SMART_PROXY_PORT}/"],
+      "env": {
+        "WORKING_DIR": "${working_dir}"
+      }
+    }
+  }
+}
+EOF
+    
+    echo "$config_file"
+}
+
+# Check if smart proxy is running
+check_smart_proxy() {
+    if ! curl -s "http://localhost:${SMART_PROXY_PORT}/health" >/dev/null 2>&1; then
+        echo "Starting MCP Smart Proxy..."
+        nohup python3 "$HOME/mcp-infra-manager/bin/mcp-smart-proxy" > "$HOME/.mcp/logs/smart-proxy.log" 2>&1 &
+        
+        # Wait for it to start
+        for i in {1..10}; do
+            if curl -s "http://localhost:${SMART_PROXY_PORT}/health" >/dev/null 2>&1; then
+                echo "Smart Proxy started successfully"
+                break
+            fi
+            sleep 1
+        done
+    fi
+}
+
+# Main execution
+main() {
+    # Ensure smart proxy is running
+    check_smart_proxy
+    
+    # Generate MCP configuration
+    local mcp_config=$(generate_mcp_config)
+    
+    # Set environment variables for Claude
+    export MCP_CONFIG_PATH="$mcp_config"
+    export CLAUDE_MCP_ENABLED=true
+    export CLAUDE_WORKING_DIR="$PWD"
+    
+    # Launch Claude with MCP support
+    exec "$CLAUDE_CMD" "$@"
+}
+
+# Run main function
+main "$@"
