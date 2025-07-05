@@ -57,9 +57,14 @@ class MCPService:
             return True
         
         # Check if port is in use
-        for conn in psutil.net_connections():
-            if conn.laddr.port == self.port and conn.status == 'LISTEN':
-                return True
+        try:
+            for conn in psutil.net_connections():
+                if hasattr(conn, 'laddr') and conn.laddr and conn.laddr.port == self.port:
+                    if conn.status == 'LISTEN':
+                        return True
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            # On macOS, we might not have permission to check all connections
+            pass
         
         return False
     
@@ -113,12 +118,16 @@ class MCPService:
                     self.process.kill()
             
             # Kill any process on the port
-            for conn in psutil.net_connections():
-                if conn.laddr.port == self.port and conn.status == 'LISTEN':
-                    try:
-                        psutil.Process(conn.pid).terminate()
-                    except:
-                        pass
+            try:
+                for conn in psutil.net_connections():
+                    if hasattr(conn, 'laddr') and conn.laddr and conn.laddr.port == self.port:
+                        if conn.status == 'LISTEN':
+                            try:
+                                psutil.Process(conn.pid).terminate()
+                            except:
+                                pass
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
             
             logger.info(f"{self.name} stopped")
             return True
@@ -221,6 +230,13 @@ class SmartMCPProxy:
     async def handle_request(self, request: web.Request) -> web.Response:
         """Handle incoming requests and route to appropriate MCP"""
         try:
+            # Handle special endpoints
+            if request.path == '/health':
+                return web.json_response({'status': 'healthy', 'proxy': 'smart-mcp'})
+            
+            if request.path == '/status':
+                return await self._get_status()
+            
             # Extract context information
             headers = dict(request.headers)
             working_dir = headers.get('X-Working-Directory', os.getcwd())
@@ -276,6 +292,24 @@ class SmartMCPProxy:
             with open(config_path, 'r') as f:
                 return json.load(f)
         return None
+    
+    async def _get_status(self) -> web.Response:
+        """Get status of all MCP services"""
+        status = {
+            'proxy': 'smart-mcp',
+            'version': '1.0.0',
+            'services': {}
+        }
+        
+        for name, service in self.services.items():
+            status['services'][name] = {
+                'name': service.config.get('name', name),
+                'port': service.port,
+                'running': service.is_running(),
+                'last_activity': service.last_activity.isoformat() if service.is_running() else None
+            }
+        
+        return web.json_response(status)
     
     async def _list_available_mcps(self, allowed_mcps: Set[str]) -> web.Response:
         """List available MCPs for the current context"""

@@ -1,0 +1,65 @@
+#!/bin/bash
+# Quick setup to get MCPs working with current infrastructure
+
+echo "🚀 MCP Quick Setup"
+echo "=================="
+
+# Ensure MCP controller is running
+if ! curl -s http://localhost:8080/status >/dev/null 2>&1; then
+    echo "Starting MCP controller..."
+    nohup node ~/.bin/mcp-controller > ~/.mcp/logs/controller.log 2>&1 &
+    sleep 2
+fi
+
+# Check which MCPs are already running
+echo "Current MCP status:"
+curl -s http://localhost:8080/status | jq -r '.servers[] | "\(.name): \(.status)"'
+
+# Start missing core MCPs
+echo ""
+echo "Starting core MCPs..."
+
+# GitHub MCP
+if ! lsof -i :8081 >/dev/null 2>&1; then
+    echo "Starting GitHub MCP..."
+    cd ~ && npm exec mcp-server-github &
+    sleep 2
+fi
+
+# Filesystem MCP  
+if ! lsof -i :8082 >/dev/null 2>&1; then
+    echo "Starting Filesystem MCP..."
+    cd ~ && npm exec -y @modelcontextprotocol/server-filesystem -- ~ &
+    sleep 2
+fi
+
+# Memory MCP
+if ! lsof -i :8083 >/dev/null 2>&1; then
+    echo "Starting Memory MCP..."
+    cd ~ && npm exec mcp-server-memory &
+    sleep 2
+fi
+
+# Sequential Thinking
+if ! lsof -i :8084 >/dev/null 2>&1; then
+    echo "Starting Sequential Thinking MCP..."
+    cd ~ && npm exec mcp-sequentialthinking-tools &
+    sleep 2
+fi
+
+# OmniSearch
+if ! lsof -i :8085 >/dev/null 2>&1; then
+    echo "Starting OmniSearch MCP..."
+    cd ~ && npm exec mcp-omnisearch &
+    sleep 2
+fi
+
+echo ""
+echo "✅ Core MCPs should now be running!"
+echo ""
+echo "Check status:"
+echo "- Controller: http://localhost:8080/status"
+echo "- Smart Proxy: http://localhost:8888/status"
+echo ""
+echo "Note: Claude Code CLI currently doesn't support dynamic MCP configuration."
+echo "The MCPs available in Claude Code are determined by its internal configuration."
