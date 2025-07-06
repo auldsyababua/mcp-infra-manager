@@ -1,0 +1,86 @@
+#!/bin/bash
+# Generate context-aware CLAUDE.md based on available MCPs
+
+# Get current directory
+CURRENT_DIR=$(pwd)
+
+# Start with base content
+cat > CLAUDE.md << 'EOF'
+# Claude Instructions for This Context
+
+## Current Location
+Working Directory: $(pwd)
+
+## Available MCP Servers
+
+### Global MCPs (always available):
+EOF
+
+# List global MCPs (simplified - in reality would parse the config)
+cat >> CLAUDE.md << 'EOF'
+- **GitHub MCP**: Repository operations, issues, PRs
+- **Filesystem MCP**: Read/write files, directory operations
+- **Memory MCP**: Persistent storage across sessions
+- **Sequential-Thinking MCP**: Complex reasoning tasks
+- **OmniSearch MCP**: Web search across multiple providers
+- **Context7 MCP**: Context management
+- **Todoist MCP**: Task management
+- **Brave Search MCP**: Web search
+
+EOF
+
+# Check for project-specific MCPs
+if [[ -f ".mcp.json" ]]; then
+    echo "### Project-Specific MCPs:" >> CLAUDE.md
+    echo "" >> CLAUDE.md
+    
+    # Parse .mcp.json and list MCPs (simplified)
+    jq -r '.mcpServers | to_entries[] | "- **\(.key)**: Project-specific MCP"' .mcp.json >> CLAUDE.md 2>/dev/null || echo "- Error parsing .mcp.json" >> CLAUDE.md
+    echo "" >> CLAUDE.md
+fi
+
+# Add context-specific instructions
+if [[ "$CURRENT_DIR" == "$HOME" ]]; then
+    cat >> CLAUDE.md << 'EOF'
+
+## Context: Home Directory
+
+You're in the home directory. Use MCPs for:
+- Personal project management
+- General file operations
+- Web searches for research
+
+EOF
+elif [[ "$CURRENT_DIR" == *"/Desktop/projects/"* ]]; then
+    PROJECT_NAME=$(basename "$CURRENT_DIR")
+    cat >> CLAUDE.md << EOF
+
+## Context: Project Directory - $PROJECT_NAME
+
+You're in a project directory. Use MCPs for:
+- Project-specific operations
+- Check .mcp.json for custom tools
+- Use project MCPs for specialized tasks
+
+EOF
+fi
+
+# Add usage instructions
+cat >> CLAUDE.md << 'EOF'
+
+## How to Use MCPs
+
+1. Check available MCPs: `/mcp`
+2. Use @ to see MCP resources
+3. Call MCP tools directly when needed
+
+## Quick Commands
+
+- `@github` - See GitHub resources
+- `@filesystem` - See available files
+- `@memory` - See stored information
+
+Remember: MCPs are automatically started when you use them!
+EOF
+
+echo "✅ Generated context-aware CLAUDE.md"
